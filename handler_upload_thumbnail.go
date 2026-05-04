@@ -1,10 +1,14 @@
 package main
 
 import (
-	"fmt"
-	"net/http"
-	"io"
+	"crypto/rand"
 	"encoding/base64"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -33,7 +37,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
-	// TODO: implement the upload here
 	maxMemory := int64(10) << 20
 	err = r.ParseMultipartForm(maxMemory)
 	if err != nil {
@@ -49,10 +52,35 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 
 	mediaType := fileHeader.Header.Get("Content-Type")
-	image_data, err := io.ReadAll(fileBody)
-	b64img := base64.StdEncoding.EncodeToString(image_data)
+	fileExt := strings.Split(mediaType, "/")
+	if fileExt[0] != "image" {
+		respondWithError(w, http.StatusForbidden, "Images Only Buddy", err)
+		return
+	}
 
-	dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, b64img)
+	magicFileName := make([]byte, 32)
+	_, err = rand.Read(magicFileName)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to Fill magicFileName.", err)
+		return
+	}
+
+	encodedMagicFileName := base64.RawURLEncoding.EncodeToString(magicFileName)
+
+	imgFileName := fmt.Sprintf("%s.%s", encodedMagicFileName, fileExt[1])
+	imgFilePath := filepath.Join(cfg.assetsRoot, imgFileName)
+	img, err := os.Create(imgFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed To Create Image File on Disk.", err)
+		return
+	}
+
+	_, err = io.Copy(img, fileBody)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to Copy Image to Disk.", err)
+		return 
+	}
+
 
 	dbVideo, err := cfg.db.GetVideo(videoID)
 	if err != nil {
@@ -65,7 +93,8 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	dbVideo.ThumbnailURL = &dataURL
+	imgURL := fmt.Sprintf("http://localhost:%v/assets/%v", cfg.port, imgFileName)
+	dbVideo.ThumbnailURL = &imgURL
 	
 	err = cfg.db.UpdateVideo(dbVideo)
 	if err != nil {
