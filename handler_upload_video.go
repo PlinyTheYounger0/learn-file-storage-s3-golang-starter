@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"math"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -88,8 +93,13 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	prefix, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to Get Video Prefix.", err)
+		return
+	}
 	magicFileName := base64.RawURLEncoding.EncodeToString(bytes)
-	key := fmt.Sprintf("%s.mp4", magicFileName)
+	key := fmt.Sprintf("%s/%s.mp4",prefix, magicFileName)
 
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket: &cfg.s3Bucket,
@@ -99,6 +109,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	})
 
 	videoURL :=  fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, key)
+	log.Printf("Video Uploaded to URL: %s\n", videoURL)
 	dbVideo.VideoURL = &videoURL
 
 	err = cfg.db.UpdateVideo(dbVideo)
@@ -107,3 +118,58 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 }
+
+func getVideoAspectRatio(filepath string) (string, error) {
+	var b bytes.Buffer
+	var videoAspectRatio string
+
+	ffprobe := exec.Command("ffprobe", 
+		"-v",
+		"error",
+		"-print_format",
+		"json",
+		"-show_streams",
+		filepath,
+	)
+
+	ffprobe.Stdout = &b
+
+	err := ffprobe.Run()
+	if err != nil {
+		return "", err
+	}
+
+	type res struct {
+		Streams []struct {
+			Width int `json:"width"`
+			Height int `json:"height"`
+		} `json:"streams"`
+	}
+
+	result := res{}
+	err = json.Unmarshal(b.Bytes(), &result)
+	if err != nil {
+		return "", err
+	}
+	
+	width := result.Streams[0].Width
+	height := result.Streams[0].Height
+	fmt.Printf("Width: %d, Height: %d\n", width, height)  
+
+	aspectRatio := float64(width) / float64(height)
+	switch {
+	case math.Abs(aspectRatio - 1.777) < 0.1:
+		videoAspectRatio = "landscape"
+		fmt.Printf("Assigned Aspect Ratio: %s\n", videoAspectRatio)
+	case math.Abs(aspectRatio - 0.5625) < 0.1:
+		videoAspectRatio = "portrait"
+		fmt.Printf("Assigned Aspect Ratio: %s\n", videoAspectRatio)
+	default:
+		videoAspectRatio = "other"
+		fmt.Printf("Assigned Aspect Ratio: %s\n", videoAspectRatio)
+	}
+
+	return videoAspectRatio, nil
+}
+
+func processVideoForFastStart(filePath string) (string, error) 
